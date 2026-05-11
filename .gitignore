@@ -1,0 +1,51 @@
+# --- CARPETAS ESPECÍFICAS DEL PROYECTO ---
+# Agrega aquí los nombres de las carpetas que TÚ no quieres respaldar
+modules_/
+**/bkup/
+
+
+# --- ENTORNOS VIRTUALES ---
+# Ignora el venv si está dentro o una carpeta arriba (común)
+.venv/
+venv/
+../.venv/
+../../.venv/
+../../../.venv/
+env/
+ENV/
+
+# --- PYTHON ---
+# Archivos compilados y caché
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- VS CODE ---
+.vscode/
+*.code-workspace
+
+# --- SISTEMA (macOS) ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
