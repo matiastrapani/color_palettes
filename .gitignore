@@ -2,7 +2,8 @@
 # Agrega aquí los nombres de las carpetas que TÚ no quieres respaldar
 modules_/
 **/bkup/
-
+entrada/
+salida/
 
 # --- ENTORNOS VIRTUALES ---
 # Ignora el venv si está dentro o una carpeta arriba (común)
@@ -13,6 +14,9 @@ venv/
 ../../../.venv/
 env/
 ENV/
+
+# --- MODELOS ---
+*.pt
 
 # --- PYTHON ---
 # Archivos compilados y caché
