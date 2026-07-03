@@ -8,7 +8,7 @@ def segmentacion_color_total():
     model = SAM("./models/sam2.1_l.pt") 
     device = "mps"
     
-    img_path = "entrada/piñeyro_001_s.jpg"
+    img_path = "entrada/isleta/PIÑEYRO_ISLETA_260616_F1937_F1941.jpg"
     output_dir = "salida/visualizacion"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -35,7 +35,7 @@ def segmentacion_color_total():
     )
 
     # 4. Guardar resultado final
-    output_path = os.path.join(output_dir, "fachada_segmentada_total.jpg")
+    output_path = os.path.join(output_dir, "fachada_segmentada_isleta.jpg")
     
     # Importante: results.plot() devuelve BGR, ideal para OpenCV
     import cv2
