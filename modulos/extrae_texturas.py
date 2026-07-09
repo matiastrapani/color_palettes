@@ -70,8 +70,8 @@ def extraer_textura_photopea_con_mascara(ruta_imagen: str, ruta_mascara: str | N
     plt.show()
 
 if __name__ == "__main__":
-    dir_entrada = "entrada/isleta"
-    dir_mascara = "salida/isleta/masc"
+    dir_entrada = "./../entrada/isleta"
+    dir_mascara = "./../salida/isleta/masc"
     filename = "PIÑEYRO_ISLETA_260616_F1971_2022.jpg"
     masc_filename = "MASC_PIÑEYRO_ISLETA_260616_F1971_2022_.png"
     RUTA_TEST = os.path.join(dir_entrada, filename)

@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import matplotlib.transforms as transforms
+from matplotlib.ticker import FuncFormatter
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from mpl_toolkits.mplot3d.axes3d import Axes3D
@@ -8,7 +10,9 @@ from matplotlib.collections import PathCollection
 from matplotlib.text import Annotation
 from skimage import color
 from typing import Any, cast
-from modulos.modelo_color import AgrupadorColor, EstadoImagen
+from modulos.modelo_color import AgrupadorColor, EstadoImagen, NomencladorColor
+from modulos.configuracion import ParametrosAnalisis
+from modulos.metricas import MetricasProcesamiento
 
 
 class VentanaDetalleColor:
@@ -25,7 +29,13 @@ class VentanaDetalleColor:
         self.ax_color_promedio: Axes | None = None
         self.ax_color_pico: Axes | None = None
         self.mapa_total_familias: np.ndarray | None = None  # <--- Contenedor del lienzo precargado
+        self.cobertura_total_txt: str = ""
         self.activa: bool = False
+        self._mascara_precalculada: np.ndarray | None = None
+
+        self.ax_hist_L: Axes | None = None
+        self.ax_hist_C: Axes | None = None
+        self.ax_hist_T: Axes | None = None
 
     def inicializar(self) -> None:
         """Inicializa la ventana con una grilla geométrica fija y de tipo estricto."""
@@ -33,14 +43,26 @@ class VentanaDetalleColor:
         if not isinstance(figura, Figure): return
         self.fig = figura
         
-        # Usamos tuplas explícitas y cast a Axes para satisfacer a Pylance
+        # 1. MANCHAS (Arriba: y=0.52, alto=0.40) - SIN CAMBIOS
         self.ax_imagen_origen = cast(Axes, self.fig.add_axes((0.05, 0.52, 0.28, 0.40)))
         self.ax_todas_las_familias = cast(Axes, self.fig.add_axes((0.36, 0.52, 0.28, 0.40)))
         self.ax_segmentada = cast(Axes, self.fig.add_axes((0.67, 0.52, 0.28, 0.40)))
         
-        self.ax_color_centro = cast(Axes, self.fig.add_axes((0.08, 0.18, 0.22, 0.22)))
-        self.ax_color_promedio = cast(Axes, self.fig.add_axes((0.39, 0.18, 0.22, 0.22)))
-        self.ax_color_pico = cast(Axes, self.fig.add_axes((0.70, 0.18, 0.22, 0.22)))
+        # Coordenadas: (x, y, ancho, alto)
+        # Ajusta estos valores según el espacio libre en tu figura de 12x9
+        self.ax_hist_L = self.fig.add_axes((0.08, 0.45, 0.22, 0.10))
+        self.ax_hist_C = self.fig.add_axes((0.39, 0.45, 0.22, 0.10))
+        self.ax_hist_T = self.fig.add_axes((0.70, 0.45, 0.22, 0.10))
+
+
+        #self.ax_color_centro = cast(Axes, self.fig.add_axes((0.08, 0.18, 0.22, 0.10)))
+        self.ax_color_centro = cast(Axes, self.fig.add_axes((0.07, 0.2, 0.1, 0.13)))
+        #self.ax_color_promedio = cast(Axes, self.fig.add_axes((0.39, 0.18, 0.22, 0.10)))
+        #self.ax_color_promedio = cast(Axes, self.fig.add_axes((0.39, 0.15, 0.075, 0.08)))
+        #self.ax_color_pico = cast(Axes, self.fig.add_axes((0.70, 0.18, 0.22, 0.10)))
+        #self.ax_color_pico = cast(Axes, self.fig.add_axes((0.70, 0.15, 0.075, 0.08)))
+        self.ax_color_promedio = cast(Axes, self.fig.add_axes((0.37, 0.24, 0.1, 0.09)))
+        self.ax_color_pico = cast(Axes, self.fig.add_axes((0.37, 0.06, 0.1, 0.09)))
         
         ejes: list[Axes] = [
             self.ax_imagen_origen, self.ax_segmentada, self.ax_todas_las_familias,
@@ -49,6 +71,15 @@ class VentanaDetalleColor:
         
         for ax in ejes:
             ax.axis('off')
+
+
+        
+        # Añade los nuevos ejes a la lista para limpiar
+        ejes = [
+            self.ax_imagen_origen, self.ax_segmentada, self.ax_todas_las_familias,
+            self.ax_color_centro, self.ax_color_promedio, self.ax_color_pico,
+            self.ax_hist_L, self.ax_hist_C, self.ax_hist_T
+        ]
 
         self.txt_bienvenida = self.fig.text(
             0.5, 0.5, "Seleccione una familia\nen el gráfico 3D", 
@@ -69,6 +100,10 @@ class VentanaDetalleColor:
                     plt.close(fig_obj)
 
         self.fig.canvas.mpl_connect('close_event', _al_cerrar_ficha)
+
+        # Inicialmente ocultos
+        for ax in [self.ax_hist_L, self.ax_hist_C, self.ax_hist_T]:
+            ax.set_visible(False)
   
     def _on_close(self, event: Any) -> None:
         self.activa = False
@@ -81,6 +116,8 @@ class VentanaDetalleColor:
         indices_pixeles_familia: np.ndarray, 
         anclas: np.ndarray, 
         estado_contexto: EstadoImagen,
+        config: ParametrosAnalisis,
+        metricas: MetricasProcesamiento,
         nomenclador: Any | None = None
     ) -> None:
         """Actualiza todos los paneles con la información de la elipsoide seleccionada."""
@@ -93,124 +130,315 @@ class VentanaDetalleColor:
             
         assert self.ax_imagen_origen is not None
         assert self.ax_segmentada is not None
-        assert self.ax_todas_las_familias is not None # <--- AGREGAR ESTO
+        assert self.ax_todas_las_familias is not None
         assert self.ax_color_centro is not None
         assert self.ax_color_promedio is not None
         assert self.ax_color_pico is not None
+        assert self.ax_hist_L is not None
+        assert self.ax_hist_C is not None
+        assert self.ax_hist_T is not None
 
-        alto_real = estado_contexto.alto
-        ancho_real = estado_contexto.ancho
-        lab_total = estado_contexto.lab_plano
+        alto_real, ancho_real = estado_contexto.alto, estado_contexto.ancho
         rgb_completo = estado_contexto.rgb_plano
+        tol_L, tol_C, tol_T = config.tolerancia_L, config.tolerancia_C, config.tolerancia_T
 
-        nombre_centro = "Desconocido"
-        nombre_promedio = "Desconocido"
-        nombre_pico = "Desconocido"
+        # --- CÁLCULOS ---
+        nombre_centro = nomenclador.obtener_nombre(centro_lab) if nomenclador else "Desconocido"
+        pixeles_f_lab = estado_contexto.lab_plano[indices_pixeles_familia]
         
-        if nomenclador is not None:
-            nombre_centro = nomenclador.obtener_nombre(centro_lab)
+        C_centro_norm = np.hypot(centro_lab[1], centro_lab[2])
+        dir_a = centro_lab[1] / C_centro_norm if C_centro_norm > 1e-6 else 1.0
+        dir_b = centro_lab[2] / C_centro_norm if C_centro_norm > 1e-6 else 0.0
+        
+        H_val = pixeles_f_lab[:, 1] * (-dir_b) + pixeles_f_lab[:, 2] * dir_a
+        C_val = pixeles_f_lab[:, 1] * dir_a + pixeles_f_lab[:, 2] * dir_b
+        L_val = pixeles_f_lab[:, 0]
 
-        pixeles_f_lab = lab_total[indices_pixeles_familia]
-
-        if len(pixeles_f_lab) > 0:
-            promedio_lab = np.mean(pixeles_f_lab, axis=0)
-            rgb_promedio = np.clip(color.lab2rgb(promedio_lab.reshape(1, 1, 3)).flatten(), 0, 1)
-            if nomenclador is not None:
-                nombre_promedio = nomenclador.obtener_nombre(promedio_lab)
-        else:
-            promedio_lab = centro_lab
-            rgb_promedio = rgb_centro
-            nombre_promedio = nombre_centro
+        # Cálculos para muestras de color
+        promedio_lab = np.mean(pixeles_f_lab, axis=0) if len(pixeles_f_lab) > 0 else centro_lab
+        rgb_promedio = np.clip(color.lab2rgb(promedio_lab.reshape(1, 1, 3)).flatten(), 0, 1)
+        nombre_promedio = nomenclador.obtener_nombre(promedio_lab) if nomenclador else "Desconocido"
 
         if len(anclas) > 0 and len(pixeles_f_lab) > 0:
-            distancias_anclas = np.linalg.norm(anclas - centro_lab, axis=1)
-            idx_ancla_pico = np.argmin(distancias_anclas)
-            lab_pico = anclas[idx_ancla_pico]
+            lab_pico = anclas[np.argmin(np.linalg.norm(anclas - centro_lab, axis=1))]
             rgb_pico = np.clip(color.lab2rgb(lab_pico.reshape(1, 1, 3)).flatten(), 0, 1)
-            if nomenclador is not None:
-                nombre_pico = nomenclador.obtener_nombre(lab_pico)
+            nombre_pico = nomenclador.obtener_nombre(lab_pico) if nomenclador else "Desconocido"
         else:
-            lab_pico = centro_lab
-            rgb_pico = rgb_centro
-            nombre_pico = nombre_centro
+            lab_pico, rgb_pico, nombre_pico = centro_lab, rgb_centro, nombre_centro
 
-        lab_centro_txt = f"{nombre_centro}\n\nL*: {centro_lab[0]:.1f}\na*: {centro_lab[1]:.1f}\nb*: {centro_lab[2]:.1f}"
-        lab_promedio_txt = f"{nombre_promedio}\n\nL*: {promedio_lab[0]:.1f}\na*: {promedio_lab[1]:.1f}\nb*: {promedio_lab[2]:.1f}"
-        lab_pico_txt = f"{nombre_pico}\n\nL*: {lab_pico[0]:.1f}\na*: {lab_pico[1]:.1f}\nb*: {lab_pico[2]:.1f}"
-
-        # 1. GENERACIÓN DE MANCHA PURA (Fondo Blanco)
+        # --- 1. RENDERIZADO DE MANCHAS ---
         mancha_perfecta = np.ones((alto_real, ancho_real, 3), dtype=np.float32)
-        mancha_perfecta_plana = mancha_perfecta.reshape(-1, 3)
-        
         if len(indices_pixeles_familia) > 0:
-            mancha_perfecta_plana[indices_pixeles_familia] = rgb_completo[indices_pixeles_familia]
+            mancha_perfecta.reshape(-1, 3)[indices_pixeles_familia] = rgb_completo[indices_pixeles_familia]
             
-        mancha_perfecta = mancha_perfecta.reshape(alto_real, ancho_real, 3)
+        area_util, total_abs = f_num(metricas.muestras_utiles), f_num(metricas.total_absoluto)
+        pix_cub = f_num(metricas.pixeles_cubiertos)
+        pct_cob = f_num(metricas.cobertura_util_pct, decimales=2)
+        cant = f_num(metricas.familias.get(idx, {}).get("cantidad_pixeles", 0)) if metricas.familias else "0"
+        pct_f = f_num(metricas.familias.get(idx, {}).get("porcentaje_cobertura", 0.0), decimales=2) if metricas.familias else "0.00"
 
-        # 2. GENERACIÓN DE MANCHA SUPERPUESTA (Fachada original atenuada de fondo)
-        imagen_origen_limpia = np.nan_to_num(estado_contexto.rgb, nan=1.0)
-        imagen_combinada = imagen_origen_limpia.copy()
-        
-        # Atenuamos toda la imagen original al 30% para que resalte la ubicación real de la mancha
-        mascara_resto = np.ones(alto_real * ancho_real, dtype=bool)
-        if len(indices_pixeles_familia) > 0:
-            mascara_resto[indices_pixeles_familia] = False
-        mascara_resto = mascara_resto.reshape(alto_real, ancho_real)
-        imagen_combinada[mascara_resto] *= 0.3
-
-        # Renderizado de ejes
         self.ax_imagen_origen.clear()
         self.ax_imagen_origen.imshow(np.nan_to_num(estado_contexto.rgb, nan=1.0))
-        self.ax_imagen_origen.set_title("Imagen Original", fontsize=11, fontweight='normal')
+        self.ax_imagen_origen.set_title(f"Imagen original: {total_abs} px ({metricas.ancho_px} x {metricas.alto_px})\nArea útil: {area_util} px", fontsize=11)
         self.ax_imagen_origen.axis('off')
 
-        self.ax_segmentada.clear()
-        self.ax_segmentada.imshow(mancha_perfecta)
-        self.ax_segmentada.set_title(f"Mancha de la Familia #{idx + 1}", fontsize=11, fontweight='normal')
-        self.ax_segmentada.axis('off')
-
-        # NUEVO: Renderizado del mapa total unificado
         self.ax_todas_las_familias.clear()
         if self.mapa_total_familias is not None:
             self.ax_todas_las_familias.imshow(self.mapa_total_familias)
-        self.ax_todas_las_familias.set_title("Reconstrucción Total", fontsize=11, fontweight='normal')
+        self.ax_todas_las_familias.set_title(f"Reconstrucción total: {pix_cub} px\nCobertura s/ área útil: {pct_cob}%", fontsize=11)
         self.ax_todas_las_familias.axis('off')
 
+        self.ax_segmentada.clear()
+        self.ax_segmentada.imshow(mancha_perfecta)
+        self.ax_segmentada.set_title(f"Familia {idx + 1}: {cant} px\nCobertura s/ área útil: {pct_f}%", fontsize=11)
+        self.ax_segmentada.axis('off')
+
+        # --- 2. RENDERIZADO DE HISTOGRAMAS ---
+        for ax in [self.ax_hist_L, self.ax_hist_C, self.ax_hist_T]: ax.set_visible(True)
+        self._dibujar_histograma_1d(self.ax_hist_L, L_val, pixeles_f_lab, tol_L, "Histograma L* (Luminosidad/Valor)", centro_lab, 'L')
+        self._dibujar_histograma_1d(self.ax_hist_C, C_val, pixeles_f_lab, tol_C, "Histograma C* (Chroma/Saturación) ", centro_lab, 'C')
+        self._dibujar_histograma_1d(self.ax_hist_T, H_val, pixeles_f_lab, tol_T, "Histograma h (Tono)", centro_lab, 'H')
+
+        # --- 3. RENDERIZADO DE MUESTRAS ---
+        # Reactivamos los paneles de visualización de color
+        for ax in [self.ax_color_centro, self.ax_color_promedio, self.ax_color_pico]:
+            ax.set_visible(True)
+
+        # Función auxiliar para calcular LCH y formatear los renglones
+        def formatear_texto_color(nombre: str, lab: np.ndarray) -> str:
+            L, a, b = lab
+            C = np.hypot(a, b)
+            h = np.degrees(np.arctan2(b, a)) % 360
+            return f"Color: {nombre}\nCIELAB:\nL*: {L:.2f},  a*: {a:.2f},  b*: {b:.2f}\nCIELCh:\nL*: {L:.2f},  C*: {C:.2f},  h: {h:.1f}°"
+
+        
+
+        # 1. Centroide
         self.ax_color_centro.clear()
         self.ax_color_centro.imshow([[np.clip(rgb_centro, 0, 1)]])
         self.ax_color_centro.axis('off')
-        self.ax_color_centro.set_title("1. Centroide Geométrico\n(Media Teórica)", fontsize=10)
-        self.ax_color_centro.text(0.5, -0.15, lab_centro_txt, transform=self.ax_color_centro.transAxes, 
-                                  ha='center', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
+        self.ax_color_centro.set_title("Color de la familia\nCentroide geométrico", fontsize=11, ha='left', loc='left', x=0)
+        self.ax_color_centro.text(1.15, 0.65, formatear_texto_color(nombre_centro, centro_lab), 
+                                  transform=self.ax_color_centro.transAxes, ha='left', va='center', 
+                                  fontsize=9)
 
+        # 2. Promedio
         self.ax_color_promedio.clear()
         self.ax_color_promedio.imshow([[np.clip(rgb_promedio, 0, 1)]])
         self.ax_color_promedio.axis('off')
-        self.ax_color_promedio.set_title("2. Promedio Real\nde la Familia", fontsize=10)
-        self.ax_color_promedio.text(0.5, -0.15, lab_promedio_txt, transform=self.ax_color_promedio.transAxes, 
-                                    ha='center', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
+        self.ax_color_promedio.set_title("Promedio\nde las muestras", fontsize=11, ha='left', loc='left', x=0)
+        self.ax_color_promedio.text(1.15, 0.5, formatear_texto_color(nombre_promedio, promedio_lab), 
+                                    transform=self.ax_color_promedio.transAxes, ha='left', va='center', 
+                                    fontsize=9)
 
+        # 3. Pico
         self.ax_color_pico.clear()
         self.ax_color_pico.imshow([[np.clip(rgb_pico, 0, 1)]])
         self.ax_color_pico.axis('off')
-        self.ax_color_pico.set_title("3. Pico de Densidad\n(Ancla de la Familia)", fontsize=10)
-        self.ax_color_pico.text(0.5, -0.15, lab_pico_txt, transform=self.ax_color_pico.transAxes, 
-                                ha='center', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
+        self.ax_color_pico.set_title("Pico de densidad\nde las muestras", fontsize=11, ha='left', loc='left', x=0)
+        self.ax_color_pico.text(1.15, 0.5, formatear_texto_color(nombre_pico, lab_pico), 
+                                transform=self.ax_color_pico.transAxes, ha='left', va='center', 
+                                fontsize=9)
 
         self.fig.suptitle(f"FAMILIA #{idx + 1}: {nombre_centro}", fontsize=11, fontweight='normal')
         self.fig.canvas.draw_idle()
         if self.fig.canvas.manager is not None:
             self.fig.canvas.manager.show()
 
+    def _dibujar_histograma_1d(
+        self, ax: Axes, valores_abs: np.ndarray, pixeles_f_lab: np.ndarray, 
+        tolerancia: float, titulo: str, centro_lab: np.ndarray, atributo: str
+    ) -> None:
+        ax.clear()
+        L0, A0, B0 = centro_lab
+        C0 = np.hypot(A0, B0)
+        
+        if atributo == 'L':
+            centro_val = L0
+        elif atributo == 'C':
+            centro_val = C0
+        else: # 'H' o 'T'
+            centro_val = 0.0
+            
+        radio_visual = (tolerancia / 2.0) * 1.2  # Equivalente a tolerancia / 1.2
+        x_min, x_max = centro_val - radio_visual, centro_val + radio_visual
+        
+        # 1. Usamos 21 bins para que haya una barra central exacta en centro_val
+        num_bins = 21
+        bins_edges = np.linspace(x_min, x_max, num_bins + 1)
+        indices = np.digitize(valores_abs, bins_edges) - 1
+        ax.figure.subplots_adjust(bottom=0.3)
+        
+        # 2. Dibujo de barras
+        for i in range(num_bins):
+            # El centro del bin es el promedio de los bordes
+            bin_medio = (bins_edges[i] + bins_edges[i+1]) / 2
+            desvio = bin_medio - centro_val
+            
+            rgb_bin = self._obtener_color_teorico(desvio, atributo, centro_lab)
+            
+            mask = indices == i
+            if np.sum(mask) > 0:
+                ax.bar(bin_medio, np.sum(mask), width=(bins_edges[i+1]-bins_edges[i]), 
+                       color=rgb_bin, edgecolor=None, linewidth=0.5)
+
+        # 3. Referencias (Se mantiene igual que antes)
+        color_centroide = self._obtener_color_teorico(0.0, atributo, centro_lab)
+        ax.plot([x_min, x_max], [0, 0], color="black", 
+                linestyle='-', linewidth=0.80, transform=ax.get_xaxis_transform(), 
+                clip_on=False, zorder=0)
+        
+
+        puntos_a_dibujar = [x_min, centro_val, x_max]
+        if atributo == 'C':
+            if x_min <= 0.0 <= x_max:
+                ax.plot([0.0, 0.0], [0.0, -0.7], color='black', linestyle='-', 
+                        alpha=1.0, linewidth=1.0, transform=ax.get_xaxis_transform(), 
+                        clip_on=False, zorder=0.00)
+                puntos_a_dibujar.append(0.0)
+
+
+        for px in sorted(list(set(puntos_a_dibujar))):
+            desvio_ref = px - centro_val
+            #if atributo != 'L' or px != centro_val:
+            ax.plot([px], [0], marker='o', markersize=8, 
+                    color=self._obtener_color_teorico(desvio_ref, atributo, centro_lab),
+                    transform=ax.get_xaxis_transform(), clip_on=False, markeredgecolor="black", zorder=5.1)
+
+        # 2. Posicionamiento: centro en X, debajo de los otros marcadores
+        # Usamos una altura menor (-0.55) para que queden debajo de la línea y marcadores
+        # Offset fijo de 8 puntos (hacia cada lado)
+        markersize = 12
+        dx_px = markersize / (72.0 * 2)
+        # La posición Y fija en -0.35 usando el transformador del eje X
+        y_trans = -0.35
+        if atributo == "H":
+            y_trans = -0.65
+        
+        # Transformación para el cuadrado izquierdo (offset negativo)
+        trans_min = ax.get_xaxis_transform() + transforms.ScaledTranslation(-dx_px, y_trans, ax.figure.dpi_scale_trans)
+        # Transformación para el cuadrado derecho (offset positivo)
+        trans_max = ax.get_xaxis_transform() + transforms.ScaledTranslation(dx_px, y_trans, ax.figure.dpi_scale_trans)
+        
+        color_min = self._obtener_color_teorico(x_min - centro_val, atributo, centro_lab)
+        color_max = self._obtener_color_teorico(x_max - centro_val, atributo, centro_lab)
+        
+        # Dibujamos ambos cuadrados en el centro del eje (centro_val)
+        # La transformación se encarga de moverlos a los lados
+        ax.plot([centro_val], [0], marker='s', markersize=markersize, 
+                color=color_min, transform=trans_min, 
+                clip_on=False, markeredgecolor="white")
+        
+        ax.plot([centro_val], [0], marker='s', markersize=markersize, 
+                color=color_max, transform=trans_max, 
+                clip_on=False, markeredgecolor="white")
+
+        # Eje angular secundario para Tono (T o H)
+        if atributo == "H":
+            C0 = np.hypot(A0, B0)
+            if C0 > 0.1: 
+                angle_centroid = np.degrees(np.arctan2(B0, A0)) % 360
+                
+                # 2. Función forward normalizada
+                def forward(linear_dev):
+                    return (angle_centroid + np.degrees(linear_dev / C0)) % 360
+                
+                # 3. Función inversa (calculamos la diferencia respecto al centroide)
+                def inverse(angle_deg):
+                    # Calculamos el desplazamiento angular mínimo para evitar saltos en 0/360
+                    diff = (angle_deg - angle_centroid + 180) % 360 - 180
+                    return np.radians(diff) * C0
+                
+                # 1. Dejamos el eje angular en la posición principal (abajo, sin offset)
+                sec_ax = ax.secondary_xaxis('bottom', functions=(forward, inverse))
+                sec_ax.spines['bottom'].set_position(('outward', 0))
+                sec_ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:.0f}°"))
+                
+                # 2. Movemos el eje lineal a la posición secundaria (abajo, con offset)
+                ax.spines['bottom'].set_position(('outward', 20))
+                
+                # Mantenemos los estilos originales
+                #sec_ax.tick_params(axis='x', labelsize=7)
+                #ax.tick_params(axis='x', labelsize=7)
+
+
+        ax.set_title(titulo, fontsize=11)
+        ax.set_xlim(x_min, x_max)
+        ax.axvline(centro_val, color='black', linestyle='--', linewidth=0.8)
+        ax.set_yticks([])
+        ax.spines[['top', 'right', 'left']].set_visible(False)
+
+        # Ajuste de etiquetas (Se mantiene igual, ahora funcionará mejor con los 21 bins)
+        ax.figure.canvas.draw()
+
+        #Ajuste del 0 en Chroma
+        if atributo == 'C' and (x_min <= 0.0 <= x_max):
+            dx = 3/72. 
+            offset = transforms.ScaledTranslation(dx, 0, ax.figure.dpi_scale_trans)
+            for label in ax.get_xticklabels():
+                texto = label.get_text().replace('-', '-').replace('-', '-')
+                try:
+                    if float(texto) == 0.0:
+                        label.set_transform(label.get_transform() + offset)
+                        label.set_horizontalalignment('left')
+                except ValueError:
+                    continue
+
+    def _calcular_color_para_bin(
+        self, 
+        val_medio: float, 
+        atributo: str, 
+        centro_lab: np.ndarray, 
+        x_min: float, 
+        x_max: float
+    ) -> np.ndarray:
+        """Calcula el color RGB consistente con el sistema local del agrupador."""
+        L0, A0, B0 = centro_lab
+        # Obtenemos los mismos vectores que usa el agrupador para definir la elipsoide
+        uR_a, uR_b, uT_a, uT_b = AgrupadorColor.obtener_sistema_local(centro_lab)
+        
+        # El desvío respecto al centroide es el valor actual menos el centro (o 0 si es relativo)
+        desvio = val_medio
+        
+        if atributo == 'H':
+            # Proyección sobre el vector tangente (uT)
+            # Esto es lo que define el plano de tono en tu modelo
+            lab_color = [L0, A0 + desvio * uT_a, B0 + desvio * uT_b]
+            
+        elif atributo == 'C':
+            # Proyección sobre el vector radial (uR)
+            lab_color = [L0, A0 + desvio * uR_a, B0 + desvio * uR_b]
+            
+        else: # Atributo 'L'
+            # Desplazamiento lineal en el eje L
+            lab_color = [L0 + desvio, A0, B0]
+            
+        # Retorno con clipping para asegurar rango RGB
+        return np.clip(color.lab2rgb(np.array(lab_color).reshape(1, 1, 3)).flatten(), 0, 1)
+
+    def _obtener_color_teorico(self, desvio: float, atributo: str, centro: np.ndarray) -> np.ndarray:
+        L0, A0, B0 = centro
+        uR_a, uR_b, uT_a, uT_b = AgrupadorColor.obtener_sistema_local(centro)
+        
+        if atributo == 'L':
+            lab = [L0 + desvio, A0, B0]
+        elif atributo == 'C':
+            lab = [L0, A0 + desvio * uR_a, B0 + desvio * uR_b]
+        elif atributo == 'H':  # o 'T'
+            lab = [L0, A0 + desvio * uT_a, B0 + desvio * uT_b]
+            
+        rgb = color.lab2rgb(np.array(lab).reshape(1, 1, 3)).flatten()
+        return np.clip(rgb, 0, 1)
 
 class VisualizadorEspacioColor:
     """
     Encapsula el entorno gráfico 3D de Matplotlib, renderiza los datos
     espaciales y gestiona las colisiones de eventos de mouse del usuario.
     """
-    def __init__(self, tolerancias: dict[str, float] | None = None) -> None:
-        self.tolerancias = tolerancias or {"L": 20.0, "C": 20.0, "T": 10.0}
-        
+    def __init__(self, config: ParametrosAnalisis, metricas: MetricasProcesamiento) -> None:
+        self.config = config
+        self.tolerancias = {"L": config.tolerancia_L, "C": config.tolerancia_C, "T": config.tolerancia_T}
+
         self.fig: Figure | None = None
         self.ax: Axes | None = None
         self.anotacion: Annotation | None = None
@@ -223,7 +451,7 @@ class VisualizadorEspacioColor:
         self.check_visualizacion: Any | None = None
         self.datos_centros_lab: np.ndarray = np.empty((0, 3))
         self.datos_colores_rgb: list[np.ndarray] = []
-        self.nomenclador: Any | None = None
+        self.nomenclador: NomencladorColor | None = None
         self._texto_titulo_paleta: Any | None = None
 
         self._ventana_detalle = None
@@ -238,6 +466,8 @@ class VisualizadorEspacioColor:
         self._cid_click = None
         self._cid_hover_reticula = None
         self._cid_click_reticula = None
+
+        self.calculador = metricas
 
     def _setup_callbacks(self) -> None:
         """Paso 1: Este método conecta TODOS los eventos una sola vez."""
@@ -277,7 +507,7 @@ class VisualizadorEspacioColor:
         self.fig.canvas.mpl_connect('figure_leave_event', on_leave_figure)
 
     def _on_click(self, event: Any) -> None:
-        if (self._agrupador is None or 
+        if (self.agrupador is None or 
             self._ventana_detalle is None or 
             self.lab_total is None or
             event.button != 1):
@@ -299,41 +529,30 @@ class VisualizadorEspacioColor:
         if idx != -1 and self.estado_original is not None:
             centro_lab = self.datos_centros_lab[idx]
             rgb_color = self.datos_colores_rgb[idx]
+            indices_pixeles_familia = self.familias_indices[idx]
             
-            indices_pixeles_familia = self._agrupador.filtrar_pixeles_por_elipsoide(
-                centro_lab, self.lab_total, tolerancias=self.tolerancias
-            )
-
-            if self.estado_original.mascara is not None:
-                mascara_plana = self.estado_original.mascara.flatten()
-                indices_pixeles_familia = indices_pixeles_familia[mascara_plana[indices_pixeles_familia].astype(bool)]
-
-            cantidad = len(indices_pixeles_familia)
+            # Obtenemos los datos precalculados de forma directa y limpia
+            familia_data = getattr(self.calculador, 'familias', {})
+            datos_mancha = familia_data.get(idx)
             
-            # CORRECCIÓN DE ÁREA ÚTIL: Eliminamos el sesgo del lienzo de fondo negro
-            if self.estado_original.mascara is not None:
-                total_util_hd = np.sum(self.estado_original.mascara)
-            else:
-                total_util_hd = np.sum(~np.isnan(self.lab_total).any(axis=1))
-                
-            porcentaje = (cantidad / total_util_hd) * 100
-            
-            # LOG EN CONSOLA EN BASE 1
-            print(f"\n[ANÁLISIS TOTAL HD] Familia #{idx + 1}:")
-            print(f" -> Cantidad de píxeles reales: {cantidad}")
-            print(f" -> Cobertura real sobre fachada nativa: {porcentaje:.2f}%")
+            if datos_mancha:
+                print(f"\n[ANÁLISIS TOTAL HD] Familia #{idx + 1}:")
+                print(f" -> Cantidad de píxeles reales: {datos_mancha['cantidad_pixeles']}")
+                print(f" -> Cobertura real sobre fachada nativa: {datos_mancha['porcentaje_cobertura']:.2f}%")
 
             anclas_envio = self.anclas if self.anclas is not None else np.empty((0, 3))
 
-            # ENVIAMOS LOS DATOS: La ventana se encarga de sus propios paneles de manera segura
+            # Pasamos las métricas unificadas donde la ventana podrá leer todo el contexto
             self._ventana_detalle.actualizar(
                 idx=idx,
                 centro_lab=centro_lab,
                 rgb_centro=rgb_color,
                 anclas=anclas_envio,
                 indices_pixeles_familia=indices_pixeles_familia,
-                estado_contexto=self._estado_contexto,
-                nomenclador=self._nomenclador
+                estado_contexto=self.estado_original,
+                metricas=self.calculador,
+                config=self.config,
+                nomenclador=self.nomenclador
             )
 
     def _on_hover(self, event: Any) -> None:
@@ -431,7 +650,7 @@ class VisualizadorEspacioColor:
     def configurar_titulo_paleta(
         self, 
         cantidad_familias: int | None = None, 
-        configuracion: dict | None = None, 
+        configuracion: ParametrosAnalisis | None = None, 
         estado_original: Any | None = None
     ) -> None:
         """
@@ -447,59 +666,24 @@ class VisualizadorEspacioColor:
                 self._texto_titulo_paleta.remove()
             except Exception:
                 pass
-            
-        # Función de formateo unificada regional (punto para miles, coma para decimales)
-        def f_num(v, decimales: int = 2) -> str:
-            if isinstance(v, (int, np.integer)):
-                return f"{v:,}".replace(",", ".")
-            elif isinstance(v, (float, np.floating)):
-                # Formateamos con el estándar inglés usando los decimales pedidos
-                cadena = f"{v:,.{decimales}f}"
-                # Intercambiamos los signos de forma segura usando un marcador temporal
-                return cadena.replace(",", "X").replace(".", ",").replace("X", ".")
-            return str(v)
 
         lineas_texto = []
         
-        # BLOQUE 1: COBERTURA Y MUESTREO (Independiente - Requiere estado_original)
+        # BLOQUE 1: COBERTURA Y MUESTREO (Solo Presentación - O(1))
         if estado_original is not None:
             lineas_texto.append("─────────────────────────────────────────")
             lineas_texto.append("COBERTURA Y MUESTREO")
             
-            alto_real, ancho_real = estado_original.alto, estado_original.ancho
-            total_muestras_absoluto = alto_real * ancho_real
-            
-            if estado_original.mascara is not None:
-                total_muestras_utiles = int(np.sum(estado_original.mascara))
-                total_muestras_enmascaradas = total_muestras_absoluto - total_muestras_utiles
-            else:
-                total_muestras_utiles = total_muestras_absoluto
-                total_muestras_enmascaradas = 0
-                
-            pixeles_cubiertos = 0
-            mascara_plana = estado_original.mascara.flatten() if estado_original.mascara is not None else None
-            
-            for centro in self.datos_centros_lab:
-                indices = self.agrupador.filtrar_pixeles_por_elipsoide(centro, self.lab_total, tolerancias=self.tolerancias)
-                if mascara_plana is not None:
-                    indices = indices[mascara_plana[indices].astype(bool)]
-                pixeles_cubiertos += len(indices)
-                
-            # Cálculos de proporciones del muestreo respecto al total absoluto
-            pct_util_del_total = (total_muestras_utiles / total_muestras_absoluto) * 100 if total_muestras_absoluto > 0 else 0.0
-            pct_enmascarado_del_total = (total_muestras_enmascaradas / total_muestras_absoluto) * 100 if total_muestras_absoluto > 0 else 0.0
+            m = self.calculador
+            pct_util = (m.muestras_utiles / m.total_absoluto) * 100 if m.total_absoluto > 0 else 0.0
+            pct_enmascarado = (m.muestras_enmascaradas / m.total_absoluto) * 100 if m.total_absoluto > 0 else 0.0
 
-            # Cálculos de coberturas (Útil vs Absoluta)
-            porcentaje_cobertura_util = (pixeles_cubiertos / total_muestras_utiles) * 100 if total_muestras_utiles > 0 else 0.0
-            porcentaje_cobertura_total = (pixeles_cubiertos / total_muestras_absoluto) * 100 if total_muestras_absoluto > 0 else 0.0
-            porcentaje_ruido = 100.0 - porcentaje_cobertura_util
-
-            lineas_texto.append(f" - Muestras Totales: {f_num(total_muestras_absoluto)} px ({ancho_real} x {alto_real})")
-            lineas_texto.append(f" - Muestras Utiles: {f_num(total_muestras_utiles)} px ({f_num(pct_util_del_total)}%)")
-            lineas_texto.append(f" - Muestras Enmascaradas: {f_num(total_muestras_enmascaradas)} px ({f_num(pct_enmascarado_del_total)}%)")
-            lineas_texto.append(f" - Cobertura de Paleta s/ Area Total: {f_num(porcentaje_cobertura_total)}%")
-            lineas_texto.append(f" - Cobertura de Paleta s/ Area Util: {f_num(porcentaje_cobertura_util)}%")
-            lineas_texto.append(f" - Ruido sin clasificar: {f_num(porcentaje_ruido)}%")
+            lineas_texto.append(f" - Area total: {f_num(m.total_absoluto)} px ({m.ancho_px} x {m.alto_px})")
+            lineas_texto.append(f" - Area útil: {f_num(m.muestras_utiles)} px ({f_num(pct_util)}%)")
+            lineas_texto.append(f" - Area enmascarada: {f_num(m.muestras_enmascaradas)} px ({f_num(pct_enmascarado)}%)")
+            lineas_texto.append(f" - Cobertura de paleta s/ área total: {f_num(m.cobertura_total_pct)}%")
+            lineas_texto.append(f" - Cobertura de paleta s/ área útil: {f_num(m.cobertura_util_pct)}%")
+            lineas_texto.append(f" - Ruido sin clasificar: {f_num(m.ruido_pct)}%")
             lineas_texto.append("─────────────────────────────────────────")
 
         # BLOQUE 2: PARÁMETROS DEL ALGORITMO (Independiente - Requiere configuracion)
@@ -509,12 +693,11 @@ class VisualizadorEspacioColor:
                 lineas_texto.append("─────────────────────────────────────────")
                 
             lineas_texto.append("PARÁMETROS DEL ALGORITMO")
-            lineas_texto.append(f" - Ancho de Reducción: {f_num(configuracion['ancho_analisis'])} px")
+            lineas_texto.append(f" - Ancho de Reducción: {f_num(configuracion.ancho_analisis)} px")
             
-            tol = configuracion["tolerancias"]
-            tol_l = f_num(tol['L'], decimales=1)
-            tol_c = f_num(tol['C'], decimales=1)
-            tol_t = f_num(tol['T'], decimales=1)
+            tol_l = f_num(configuracion.tolerancia_L, decimales=1)
+            tol_c = f_num(configuracion.tolerancia_C, decimales=1)
+            tol_t = f_num(configuracion.tolerancia_T, decimales=1)
 
             lineas_texto.append(f" - Tolerancias CIELAB:\n    ΔL* = {tol_l}  ΔC* = {tol_c}  ΔT* = {tol_t}")
             lineas_texto.append("─────────────────────────────────────────")
@@ -552,85 +735,105 @@ class VisualizadorEspacioColor:
         familias: np.ndarray,
         etiquetas_familias: np.ndarray,
         ventana_detalle: VentanaDetalleColor,
-        agrupador: Any,
-        nomenclador: Any | None = None
+        agrupador: AgrupadorColor,
+        nomenclador: NomencladorColor | None = None
     ) -> None:
         """Construye la visualización tridimensional CIELAB y mapea la interactividad."""
+        # Asignaciones críticas al inicio para evitar AttributeErrors o NoneTypes internos
+        self.agrupador = agrupador
+        self.anclas = anclas
+        self.nomenclador = nomenclador
+        self.estado_analisis = estado_analisis
+        self.estado_original = estado_original
+        self.lab_total = estado_original.lab_plano
+        
         figura = plt.figure(figsize=(10, 9))
         if not isinstance(figura, Figure):
             return
         self.fig = figura
 
-        self.agrupador = agrupador
-        self.nomenclador = nomenclador
-        self.estado_analisis = estado_analisis
-        self.estado_original = estado_original
-        
         self.datos_centros_lab = familias
-        
-        # 1. Configuración del entorno de ejes 3D y límites CIELAB
+        self.datos_colores_rgb = [np.clip(color.lab2rgb(c.reshape(1, 1, 3)).flatten(), 0, 1) for c in familias]
+
+        # --- PRECALCULO UNIFICADO DE ÍNDICES EN LA CARGA ---
+        self.familias_indices: list[np.ndarray] = []
+        mascara_plana = estado_original.mascara.flatten() if estado_original.mascara is not None else None
+
+        for centro in familias:
+            sistema_local = self.agrupador.obtener_sistema_local(centro)
+            indices_familia = self.agrupador.filtrar_pixeles_por_elipsoide(
+                centro, self.lab_total, tolerancias=self.tolerancias, sistema_local=sistema_local
+            )
+            if mascara_plana is not None:
+                indices_familia = indices_familia[mascara_plana[indices_familia].astype(bool)]
+            self.familias_indices.append(indices_familia)
+
         self._configurar_ejes_3d()
-        
-        # 2. Renderizado de las capas de datos (Brutos, Anclas, Centros y Paleta)
-        colores = [np.clip(color.lab2rgb(c.reshape(1, 1, 3)).flatten(), 0, 1) for c in familias]
-        self.datos_colores_rgb = colores
+        self._inicializar_widgets_control()
+        self._construir_reticula_lateral(familias=familias, colores=self.datos_colores_rgb)
 
-        # 3. Inicialización de los CheckButtons de control de capas
-        self._inicializar_widgets_control(familias, colores)
-
-        # 4. Construcción de la retícula interactiva lateral
-        # --- SOLUCIÓN PYLANCE & MEMORIA: Extraemos las propiedades de estado_original directamente ---
-        self._construir_reticula_lateral(
-            familias=familias, 
-            colores=colores, 
-            ventana_detalle=ventana_detalle, 
-            imagen_pil=None, # Ya no hace falta pasar PIL acá
-            lab_total=estado_original.lab_plano, 
-            rgb_total=estado_original.rgb_plano, 
-            anclas=anclas, 
-            alto_real=estado_original.alto, 
-            ancho_real=estado_original.ancho
-        )
-
-        # --- SOLUCIÓN PYLANCE: Definimos las variables locales antes de usarlas en las capas ---
-        lab_muestreo = estado_analisis.lab_plano
-        rgb_muestreo = estado_analisis.rgb_plano
-        matriz_paleta_lab = paleta_mediana.lab_plano
-        self.lab_total = estado_original.lab_plano
-
-        self._renderizar_capas_datos(
-            lab_muestreo=lab_muestreo,
-            rgb_muestreo=rgb_muestreo,
-            anclas=anclas,
-            paleta_mediana=matriz_paleta_lab,
-            familias=familias,
-            etiquetas_familias=etiquetas_familias,
-            colores=colores
-        )
-
-        # 5. Conexión de eventos interactivos globales (Hover, Click y Cierre)
-        self._ventana_detalle = ventana_detalle
-        self._agrupador = agrupador
-        self.anclas = anclas
-        self._estado_contexto = estado_original     # Guardamos el estado para evitar duplicar referencias
-        self._nomenclador = nomenclador
-
-        # --- PRECÁLCULO DEL MAPA GENERAL DE TODAS LAS FAMILIAS SOBRE BLANCO ---
         alto_real = estado_original.alto
         ancho_real = estado_original.ancho
+        total_absoluto = alto_real * ancho_real
+        muestras_utiles = int(np.sum(estado_original.mascara)) if estado_original.mascara is not None else total_absoluto
+
         mapa_total = np.ones((alto_real, ancho_real, 3), dtype=np.float32)
         mapa_total_plano = mapa_total.reshape(-1, 3)
-        mascara_plana = estado_original.mascara.flatten() if estado_original.mascara is not None else None
         
-        for centro in familias:
-            indices = agrupador.filtrar_pixeles_por_elipsoide(centro, self.lab_total, tolerancias=self.tolerancias)
-            if mascara_plana is not None:
-                indices = indices[mascara_plana[indices].astype(bool)]
-            if len(indices) > 0:
+        pixeles_cubiertos_globales = np.zeros(total_absoluto, dtype=bool)
+
+        # --- RESPONSABILIDAD DE PRESENTACIÓN EN CONSOLA ---
+        print("\n--- Desglose de Cobertura de Familias ---")
+        for idx, indices in enumerate(self.familias_indices):
+            cantidad_mancha = len(indices)
+            porcentaje_mancha = (cantidad_mancha / muestras_utiles) * 100.0 if muestras_utiles > 0 else 0.0
+            
+            centro_print = familias[idx].round(1)
+            print(f"Familia {idx+1} {centro_print}: Cobertura de Fachada = {porcentaje_mancha:.2f}%")
+            
+            if cantidad_mancha > 0:
                 mapa_total_plano[indices] = estado_original.rgb_plano[indices]
+                pixeles_cubiertos_globales[indices] = True
                 
-        self._ventana_detalle.mapa_total_familias = mapa_total.reshape(alto_real, ancho_real, 3)
-        # ----------------------------------------------------------------------
+        pixeles_cubiertos = np.sum(pixeles_cubiertos_globales)
+        cobertura_util = (pixeles_cubiertos / muestras_utiles) * 100 if muestras_utiles > 0 else 0.0
+
+        print("-----------------------------------------")
+        print(f"Área Útil Analizada (Fachada sin NaNs): {muestras_utiles} muestras.")
+        print(f"Cobertura Total de las Familias sobre Fachada: {cobertura_util:.2f}%")
+        print(f"Residuos / Ruido sin clasificar: {100.0 - cobertura_util:.2f}%\n")
+
+        self._ventana_detalle = ventana_detalle
+        self._ventana_detalle.mapa_total_familias = mapa_total
+
+        self.calculador = MetricasProcesamiento(
+            alto_px=alto_real,
+            ancho_px=ancho_real,
+            total_absoluto=total_absoluto,
+            muestras_utiles=muestras_utiles,
+            muestras_enmascaradas=total_absoluto - muestras_utiles,
+            pixeles_cubiertos=int(pixeles_cubiertos),
+            cobertura_total_pct=(pixeles_cubiertos / total_absoluto) * 100 if total_absoluto > 0 else 0.0,
+            cobertura_util_pct=cobertura_util,
+            ruido_pct=100.0 - cobertura_util,
+            familias={
+                idx: {
+                    "cantidad_pixeles": len(indices),
+                    "porcentaje_cobertura": (len(indices) / muestras_utiles) * 100.0 if muestras_utiles > 0 else 0.0
+                }
+                for idx, indices in enumerate(self.familias_indices)
+            }
+        )
+
+        self._renderizar_capas_datos(
+            lab_muestreo=estado_analisis.lab_plano,
+            rgb_muestreo=estado_analisis.rgb_plano,
+            anclas=anclas,
+            paleta_mediana=paleta_mediana.lab_plano,
+            familias=familias,
+            etiquetas_familias=etiquetas_familias,
+            colores=self.datos_colores_rgb
+        )
 
         self._setup_callbacks()
 
@@ -703,7 +906,10 @@ class VisualizadorEspacioColor:
         
         for centro in familias:
             # Filtrado directo en alta resolución sobre la imagen real
-            indices = self.agrupador.filtrar_pixeles_por_elipsoide(centro, self.lab_total, tolerancias=self.tolerancias)
+            if self.lab_total is not None:
+                indices = self.agrupador.filtrar_pixeles_por_elipsoide(
+                    centro, self.lab_total, tolerancias=self.tolerancias
+                )
             if mascara_plana is not None:
                 indices = indices[mascara_plana[indices].astype(bool)]
             conteos_reales.append(len(indices))
@@ -745,7 +951,7 @@ class VisualizadorEspacioColor:
         self.anotacion.set_visible(False)
         self.anotacion_reticula.set_visible(False)
 
-    def _inicializar_widgets_control(self, familias: np.ndarray, colores: list) -> None:
+    def _inicializar_widgets_control(self) -> None:
         """Construye los CheckButtons nativos para alternar la visibilidad de las capas."""
         assert self.fig is not None
         from matplotlib.widgets import CheckButtons
@@ -782,19 +988,15 @@ class VisualizadorEspacioColor:
     def _construir_reticula_lateral(
         self, 
         familias: np.ndarray, 
-        colores: list, 
-        ventana_detalle: VentanaDetalleColor, 
-        imagen_pil: Any, 
-        lab_total: np.ndarray, 
-        rgb_total: np.ndarray, 
-        anclas: np.ndarray | None, 
-        alto_real: int, 
-        ancho_real: int
+        colores: list,
     ) -> None:
         """Genera la grilla 2D lateral de muestras indexadas y mapea sus eventos particulares."""
         assert self.fig is not None
+        
         self.ax_reticula = self.fig.add_axes((0.02, 0.40, 0.24, 0.52))
         self.ax_reticula.axis('off')
+
+        assert self.ax_reticula is not None
         
         n_familias = len(familias)
         n_columnas = 8  
@@ -803,9 +1005,6 @@ class VisualizadorEspacioColor:
         self.ax_reticula.set_xlim(-0.5, n_columnas - 0.5)
         self.ax_reticula.set_ylim(n_filas - 0.5, -0.5)  
         self.ax_reticula.set_aspect('equal', adjustable='box')
-        
-        mapeo_celdas = {}
-        scatters_reticula = []  
         
         mapeo = {}
         for idx in range(n_familias):
@@ -850,3 +1049,14 @@ class VisualizadorEspacioColor:
         lienzo_plano_rgb[mascara_plana] = colores_fachada
         return lienzo_plano_rgb.reshape((alto, ancho, 3))
 
+# Función de formateo unificada regional (punto para miles, coma para decimales)
+def f_num(v, decimales: int = 2) -> str:
+    if isinstance(v, (int, np.integer)):
+        return f"{v:,}".replace(",", ".")
+    elif isinstance(v, (float, np.floating)):
+        # Formateamos con el estándar inglés usando los decimales pedidos
+        cadena = f"{v:,.{decimales}f}"
+        # Intercambiamos los signos de forma segura usando un marcador temporal
+        return cadena.replace(",", "X").replace(".", ",").replace("X", ".")
+    return str(v)
+        

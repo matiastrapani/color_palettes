@@ -8,7 +8,7 @@ from matplotlib.collections import PathCollection
 from matplotlib.text import Annotation
 from skimage import color
 from typing import Any, cast
-from modulos.modelo_color import AgrupadorColor, ContenedorMuestrasColor
+from modulos.modelo_color_bk import AgrupadorColor, ContenedorMuestrasColor
 
 
 class VentanaDetalleColor:

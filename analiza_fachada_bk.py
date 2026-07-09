@@ -1,15 +1,15 @@
 import os
 import matplotlib.pyplot as plt
 from PIL import Image
-from modelo_color_bk import ProcesadorEspacioColor
-from modelo_color_bk import AgrupadorColor, NomencladorColor, ContenedorMuestrasColor
-from interfase_color_bk import VentanaDetalleColor, VisualizadorEspacioColor
+from modulos.modelo_color_bk import ProcesadorEspacioColor
+from modulos.modelo_color_bk import AgrupadorColor, NomencladorColor, ContenedorMuestrasColor
+from modulos.interfase_color_bk import VentanaDetalleColor, VisualizadorEspacioColor
 
 # Parámetros de Configuración Inmutables localizados
 CONFIGURACION = {
     "tol_L": 15.0,
     "tol_C": 15.0,
-    "tol_T": 15.0,
+    "tol_T": 8.0,
     "n_paleta_mediana": 1000,
     "paso_submuestreo": 50
 }

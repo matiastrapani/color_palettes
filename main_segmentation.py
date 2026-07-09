@@ -138,12 +138,12 @@ if __name__ == "__main__":
     dir_salida = "salida/isleta"
     dir_masc = "salida/isleta/masc"
 
-    filename = "PIÑEYRO_ISLETA_260616_F1921_2.jpg"
+    filename = "PIÑEYRO_ISLETA_260616_F1971_2022.jpg"
     file_base = os.path.splitext(filename)[0]
     file_path = os.path.join(dir_entrada, filename)
     
     dir_concepts = f"{dir_masc}/MASC_{file_base}"
-    masc_path = os.path.join(dir_masc, f"MASC_{file_base}.png")
+    masc_path = os.path.join(dir_masc, f"MASC_{file_base}_2.png")
     result_path = os.path.join(dir_salida, f"RES_{filename}")
 
     img = cv2.imread(file_path)
